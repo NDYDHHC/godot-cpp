@@ -1,11 +1,12 @@
 import os
 import platform
 import sys
+from pathlib import Path
 
 import header_builders
 from SCons import __version__ as scons_raw_version
 from SCons.Action import Action
-from SCons.Builder import Builder
+from SCons.Builder import Builder, ListEmitter
 from SCons.Errors import UserError
 from SCons.Script import ARGUMENTS
 from SCons.Tool import Tool
@@ -50,6 +51,30 @@ def validate_dir(key, val, env):
 def validate_parent_dir(key, val, env):
     if not os.path.isdir(normalize_path(os.path.dirname(val), env)):
         raise UserError("'%s' is not a directory: %s" % (key, os.path.dirname(val)))
+
+
+def redirect_build_target(target, source, env):
+    if not env.get("redirect_build_objects", True):
+        return target, source
+
+    base_dir = Path(env.Dir("#").abspath).resolve()
+    redirected_targets = []
+
+    for item in target:
+        path = Path(item.get_abspath()).resolve()
+        if path.parent == base_dir / "bin":
+            redirected_targets.append(item)
+            continue
+
+        try:
+            relative_path = path.relative_to(base_dir)
+        except ValueError:
+            redirected_targets.append(item)
+            continue
+
+        redirected_targets.append(env.File(f"#bin/obj/{relative_path.as_posix()}"))
+
+    return redirected_targets, source
 
 
 def get_platform_tools_paths(env):
@@ -310,6 +335,13 @@ def options(opts, env):
         )
     )
     opts.Add(
+        BoolVariable(
+            key="redirect_build_objects",
+            help="Redirect object files to `bin/obj/` to keep source directories clean.",
+            default=env.get("redirect_build_objects", True),
+        )
+    )
+    opts.Add(
         EnumVariable(
             key="precision",
             help="Set the floating-point precision level",
@@ -528,6 +560,13 @@ def generate(env):
 
     env["suffix"] = suffix  # Exposed when included from another project
     env["OBJSUFFIX"] = suffix + env["OBJSUFFIX"]
+
+    env.Prepend(LIBEMITTER=[redirect_build_target])
+    env.Prepend(SHLIBEMITTER=[redirect_build_target])
+    for key in (emitters := env.StaticObject.builder.emitter):
+        emitters[key] = ListEmitter([redirect_build_target] + env.Flatten(emitters[key]))
+    for key in (emitters := env.SharedObject.builder.emitter):
+        emitters[key] = ListEmitter([redirect_build_target] + env.Flatten(emitters[key]))
 
     # compile_commands.json
     env.Tool("compilation_db")
